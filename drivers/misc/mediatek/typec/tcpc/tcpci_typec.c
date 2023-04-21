@@ -26,6 +26,10 @@
 #define RICHTEK_PD_COMPLIANCE_FAKE_EMRAK_ONLY	/* For Rp3A */
 #define RICHTEK_PD_COMPLIANCE_FAKE_RA_DETACH	/* For Rp-DFT */
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+extern bool oplus_vooc_get_fastchg_started(void);
+#endif /*OPLUS_FEATURE_CHG_BASIC*/
+
 enum TYPEC_WAIT_PS_STATE {
 	TYPEC_WAIT_PS_DISABLE = 0,
 	TYPEC_WAIT_PS_SNK_VSAFE5V,
@@ -119,10 +123,8 @@ static inline int typec_enable_low_power_mode(
 
 static inline int typec_enable_vconn(struct tcpc_device *tcpc)
 {
-#ifndef CONFIG_USB_POWER_DELIVERY
 	if (!typec_is_sink_with_emark())
 		return 0;
-#endif /* CONFIG_TCPC_VCONN_SUPPLY_MODE */
 
 #ifdef CONFIG_TCPC_VCONN_SUPPLY_MODE
 	if (tcpc->tcpc_vconn_supply == TCPC_VCONN_SUPPLY_NEVER)
@@ -132,6 +134,7 @@ static inline int typec_enable_vconn(struct tcpc_device *tcpc)
 	return tcpci_set_vconn(tcpc, true);
 }
 
+#ifndef OPLUS_FEATURE_CHG_BASIC
 /*
  * [BLOCK] TYPEC Connection State Definition
  */
@@ -212,6 +215,7 @@ enum TYPEC_CONNECTION_STATE {
 
 	typec_unattachwait_pe,	/* Wait Policy Engine go to Idle */
 };
+#endif /* OPLUS_FEATURE_CHG_BASIC */
 
 #if TYPEC_INFO_ENABLE || TCPC_INFO_ENABLE
 static const char *const typec_state_name[] = {
@@ -364,13 +368,22 @@ static int typec_check_water_status(struct tcpc_device *tcpc)
 #ifdef CONFIG_TYPEC_CAP_NORP_SRC
 static bool typec_try_enter_norp_src(struct tcpc_device *tcpc)
 {
-	if (tcpci_check_vbus_valid_from_ic(tcpc) &&
-	    typec_is_cc_no_res() &&
-	    tcpc->typec_state == typec_unattached_snk) {
-		TYPEC_INFO("norp_src=1\n");
+#ifndef OPLUS_FEATURE_CHG_BASIC
+	if (tcpci_check_vbus_valid(tcpc) &&
+		(tcpc->typec_state == typec_unattached_snk)) {
+		TYPEC_DBG("norp_src=1\r\n");
 		tcpc_enable_timer(tcpc, TYPEC_TIMER_NORP_SRC);
 		return true;
 	}
+#else
+	if (tcpci_check_vbus_valid(tcpc)) {
+		if (tcpc->typec_state == typec_unattached_snk) {
+			TYPEC_DBG("norp_src=1\r\n");
+			tcpc_enable_timer(tcpc, TYPEC_TIMER_NORP_SRC);
+		}
+		return true;
+	}
+#endif /* OPLUS_FEATURE_CHG_BASIC */
 
 	return false;
 }
@@ -1660,6 +1673,10 @@ static inline void typec_detach_wait_entry(struct tcpc_device *tcpc)
 	typec_legacy_handle_detach(tcpc);
 #endif	/* CONFIG_TYPEC_CHECK_LEGACY_CABLE */
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	TYPEC_INFO("typec_detach_wait_entry typec_state[%d]\n", tcpc->typec_state);
+#endif
+
 	switch (tcpc->typec_state) {
 #ifdef TYPEC_EXIT_ATTACHED_SNK_VIA_VBUS
 	case typec_attached_snk:
@@ -1799,6 +1816,10 @@ static inline bool typec_is_cc_attach(struct tcpc_device *tcpc)
 		}
 		break;
 	}
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	TYPEC_INFO("%s: cc_attach[%d]\n", __func__, cc_attach);
+#endif
 
 	return cc_attach;
 }
@@ -2036,12 +2057,21 @@ int tcpc_typec_handle_cc_change(struct tcpc_device *tcpc)
 
 	TYPEC_INFO("[CC_Alert] %d/%d\n", typec_get_cc1(), typec_get_cc2());
 
+#ifndef OPLUS_FEATURE_CHG_BASIC
+	if (typec_is_drp_toggling()) {
+		TYPEC_DBG("[Warning] DRP Toggling\r\n");
+#else
 	if (typec_is_cc_no_res()) {
-		TYPEC_DBG("[Warning] CC No Res\n");
+		TYPEC_DBG("[Warning] CC No Res\r\n");
+#endif
 		if (tcpc->typec_lpm && !tcpc->typec_cable_only)
 			typec_enter_low_power_mode(tcpc);
+#ifndef OPLUS_FEATURE_CHG_BASIC
+		return 0;
+#else
 		if (typec_is_drp_toggling())
 			return 0;
+#endif
 	}
 
 #ifdef CONFIG_TYPEC_CAP_NORP_SRC
@@ -2049,15 +2079,28 @@ int tcpc_typec_handle_cc_change(struct tcpc_device *tcpc)
 		return 0;
 #endif	/* CONFIG_TYPEC_CAP_NORP_SRC */
 
-	if (typec_is_ignore_cc_change(tcpc, rp_present))
-		return 0;
+#ifndef OPLUS_FEATURE_CHG_BASIC
+	typec_disable_low_power_mode(tcpc);
+#endif
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+		if (typec_is_ignore_cc_change(tcpc, rp_present)) {
+			TYPEC_INFO("tcpc_typec_handle_cc_change ignore cc_change\n");
+			return 0;
+		}
+#else
+		if (typec_is_ignore_cc_change(tcpc, rp_present))
+			return 0;
+#endif
 
 	if (tcpc->typec_state == typec_attachwait_snk
 		|| tcpc->typec_state == typec_attachwait_src)
 		typec_wait_ps_change(tcpc, TYPEC_WAIT_PS_DISABLE);
 
 	if (typec_is_cc_attach(tcpc)) {
+#ifdef OPLUS_FEATURE_CHG_BASIC
 		typec_disable_low_power_mode(tcpc);
+#endif
 		typec_attach_wait_entry(tcpc);
 #ifdef CONFIG_WATER_DETECTION
 		if (typec_state_old == typec_unattached_snk ||
@@ -2130,8 +2173,17 @@ static inline int typec_handle_debounce_timeout(struct tcpc_device *tcpc)
 {
 #ifdef CONFIG_TYPEC_CAP_NORP_SRC
 	if (typec_is_cc_no_res() && tcpci_check_vbus_valid(tcpc)
+#ifndef OPLUS_FEATURE_CHG_BASIC
 		&& (tcpc->typec_state == typec_unattached_snk))
-		return typec_norp_src_attached_entry(tcpc);
+		typec_norp_src_attached_entry(tcpc);
+#else
+		&& (tcpc->typec_state == typec_unattached_snk)) {
+		typec_norp_src_attached_entry(tcpc);
+		TYPEC_DBG("attached norp.src\r\n");
+		return 0;
+	}
+#endif /*OPLUS_FEATURE_CHG_BASIC*/
+
 #endif
 
 	if (typec_is_drp_toggling()) {
@@ -2525,12 +2577,21 @@ int tcpc_typec_handle_ps_change(struct tcpc_device *tcpc, int vbus_level)
 			return 0;
 #endif	/* CONFIG_TYPEC_CAP_NORP_SRC */
 
+#ifndef OPLUS_FEATURE_CHG_BASIC
+	if (typec_is_drp_toggling()) {
+		TYPEC_DBG("[Warning] DRP Toggling\r\n");
+#else
 	if (typec_is_cc_no_res()) {
-		TYPEC_DBG("[Warning] CC No Res\n");
+		TYPEC_DBG("[Warning] CC No Res\r\n");
+#endif
 		if (tcpc->typec_lpm && !tcpc->typec_cable_only)
 			typec_enter_low_power_mode(tcpc);
+#ifndef OPLUS_FEATURE_CHG_BASIC
+		return 0;
+#else
 		if (typec_is_drp_toggling())
 			return 0;
+#endif
 	}
 
 #ifdef CONFIG_TYPEC_CAP_AUDIO_ACC_SINK_VBUS
@@ -2542,6 +2603,13 @@ int tcpc_typec_handle_ps_change(struct tcpc_device *tcpc, int vbus_level)
 
 	if (vbus_level >= TCPC_VBUS_VALID)
 		return typec_handle_vbus_present(tcpc);
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	if ((oplus_vooc_get_fastchg_started() == true) && (vbus_level != 0)) {
+		pr_err("VOOC 2.0  force present");
+		return typec_handle_vbus_present(tcpc);
+	}
+#endif /*OPLUS_FEATURE_CHG_BASIC*/
 
 	return typec_handle_vbus_absent(tcpc);
 }
@@ -2823,7 +2891,21 @@ int tcpc_typec_handle_wd(struct tcpc_device *tcpc, bool wd)
 	if (!(tcpc->tcpc_flags & TCPC_FLAGS_WATER_DETECTION))
 		return 0;
 
-	TYPEC_INFO("%s %d\n", __func__, wd);
+	TYPEC_INFO("%s %d\r\n", __func__, wd);
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	tcpc->wd_already = wd;
+#endif
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	tcpci_set_water_protection(tcpc, wd);
+	if (wd)
+		ret = tcpci_set_cc(tcpc, TYPEC_CC_OPEN);
+	else
+		tcpc_typec_error_recovery(tcpc);
+	tcpci_notify_wd_status(tcpc, wd);
+	return ret;
+#endif
+
 	if (!wd) {
 		tcpci_set_water_protection(tcpc, false);
 		tcpc_typec_error_recovery(tcpc);
